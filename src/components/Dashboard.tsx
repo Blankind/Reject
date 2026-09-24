@@ -228,6 +228,12 @@ export default function Dashboard({
                       <Badge label="ERP" state={r.erpStatus} title={r.erpError || r.erpDoc} />
                       <Badge label="Sheet" state={r.sheetStatus} title={r.sheetError} />
                     </div>
+                    {(r.erpError || r.sheetError) && (
+                      <div className="mt-1 max-w-xs text-[11px] leading-snug text-rose-600">
+                        {r.erpError && <div>ERP: {r.erpError}</div>}
+                        {r.sheetError && <div>Sheet: {r.sheetError}</div>}
+                      </div>
+                    )}
                   </td>
                 </tr>
               ))}
