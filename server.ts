@@ -1,8 +1,8 @@
 import express, { NextFunction, Request, Response } from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { env, erpConfigured, erpWriteEnabled, sheetConfigured } from './server/env';
-import { checkErp, createStockEntry, listWarehouses, lookupRate, searchItems } from './server/erp';
+import { env, erpConfigured, sheetConfigured } from './server/env';
+import { checkErp, listWarehouses, lookupRate, searchItems } from './server/erp';
 import { appendRow, checkSheet } from './server/sheets';
 import { findRecord, listRecords, nextDocNumber, saveRecord } from './server/store';
 import type { RejectRecord } from './src/types';
@@ -23,19 +23,8 @@ function nowParts() {
   return { date, time };
 }
 
-/** Sync satu record ke ERP + Sheets. Aman dipanggil ulang (hanya langkah yang belum 'ok'). */
+/** Sync satu record ke Sheets (rekap). ERP hanya dipakai untuk baca item/rate, tidak ditulis. Aman dipanggil ulang. */
 async function syncRecord(r: RejectRecord): Promise<RejectRecord> {
-  if (r.erpStatus !== 'ok') {
-    try {
-      const doc = await createStockEntry(r);
-      r.erpStatus = doc ? 'ok' : 'skipped';
-      r.erpDoc = doc || r.erpDoc;
-      r.erpError = undefined;
-    } catch (e) {
-      r.erpStatus = 'failed';
-      r.erpError = errMsg(e);
-    }
-  }
   if (r.sheetStatus !== 'ok') {
     if (!sheetConfigured()) {
       r.sheetStatus = 'skipped';
@@ -62,7 +51,6 @@ async function start() {
   app.get('/api/meta', (_req, res) => {
     res.json({
       erpConfigured: erpConfigured(),
-      erpWrite: erpWriteEnabled(),
       sheetConfigured: sheetConfigured(),
       sheetUrl: env.google.sheetId ? `https://docs.google.com/spreadsheets/d/${env.google.sheetId}/edit` : '',
     });
@@ -74,6 +62,14 @@ async function start() {
 
   app.get('/api/warehouses', wrap(async (_req, res) => {
     res.json(await listWarehouses());
+  }));
+
+  // Rate valuation per item + gudang (dipakai saat pilih item di form input)
+  app.get('/api/rate', wrap(async (req, res) => {
+    const itemCode = String(req.query.itemCode || '').trim();
+    const warehouse = String(req.query.warehouse || '').trim();
+    if (!itemCode) return res.status(400).json({ error: 'itemCode wajib.' });
+    res.json({ rate: await lookupRate(itemCode, warehouse) });
   }));
 
   // Cek koneksi ERP & Google Sheets (dipakai halaman Pengaturan)
@@ -105,9 +101,7 @@ async function start() {
         {
           URL: env.erp.url || '-',
           'API Key': mask(env.erp.key),
-          'Sync Stock Entry': erpWriteEnabled()
-            ? `AKTIF (${env.erp.submit ? 'Submit' : 'Draft'}) → ${env.erp.rejectWarehouse}`
-            : 'NONAKTIF',
+          Mode: 'Baca saja (search item & rate)',
         },
         checkErp,
       ),
@@ -162,7 +156,6 @@ async function start() {
       reason,
       pic,
       notes: String(b.notes || '').trim(),
-      erpStatus: 'pending',
       sheetStatus: 'pending',
       createdAt: new Date().toISOString(),
     };
@@ -171,7 +164,7 @@ async function start() {
   }));
 
   app.post('/api/rejects/retry', wrap(async (_req, res) => {
-    const todo = listRecords().filter((r) => r.erpStatus !== 'ok' || r.sheetStatus !== 'ok');
+    const todo = listRecords().filter((r) => r.sheetStatus !== 'ok');
     for (const r of [...todo].reverse()) await syncRecord(r); // urut lama -> baru
     res.json({ retried: todo.length });
   }));
@@ -193,13 +186,13 @@ async function start() {
 
   // Auto-retry tiap 60 detik untuk record yang sync-nya gagal
   setInterval(async () => {
-    const todo = listRecords().filter((r) => r.erpStatus === 'failed' || r.sheetStatus === 'failed');
+    const todo = listRecords().filter((r) => r.sheetStatus === 'failed');
     for (const r of [...todo].reverse()) await syncRecord(r).catch(() => {});
   }, 60000);
 
   app.listen(env.port, '0.0.0.0', () => {
     console.log(`Reject Dashboard: http://localhost:${env.port}  [${isProd ? 'production' : 'dev'}]`);
-    console.log(`ERP: ${erpConfigured() ? 'on' : 'off'} (write: ${erpWriteEnabled() ? 'on' : 'off'}) | Sheets: ${sheetConfigured() ? 'on' : 'off'}`);
+    console.log(`ERP (baca item/rate): ${erpConfigured() ? 'on' : 'off'} | Sheets: ${sheetConfigured() ? 'on' : 'off'}`);
   });
 }
 
