@@ -38,12 +38,33 @@ export default function RejectModal({
   const [notes, setNotes] = useState('');
 
   const [saving, setSaving] = useState(false);
+  const [rateLoading, setRateLoading] = useState(false);
   const [error, setError] = useState('');
   const seq = useRef(0);
 
   useEffect(() => {
     api.warehouses().then(setWarehouses).catch(() => {});
   }, []);
+
+  // Ambil valuation rate dari ERP berdasarkan item + gudang yang dipilih (Bin gudang -> fallback Item master).
+  // Jalan ulang tiap kali item atau gudang berganti.
+  useEffect(() => {
+    if (manual || !item || !warehouse.trim()) return;
+    let alive = true;
+    setRateLoading(true);
+    api
+      .rate(item.item_code, warehouse.trim())
+      .then(({ rate: r }) => {
+        if (alive) setRate(String(r));
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (alive) setRateLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [item, warehouse, manual]);
 
   // Typeahead item (debounce 300ms, abaikan respons usang)
   useEffect(() => {
@@ -133,7 +154,9 @@ export default function RejectModal({
           {/* ITEM */}
           <div>
             <div className="mb-1 flex items-center justify-between">
-              <span className="text-xs font-bold text-slate-600">Item</span>
+              <span className="text-xs font-bold text-slate-600">
+                Item <span className="text-rose-500">*</span>
+              </span>
               <button
                 type="button"
                 onClick={() => {
@@ -199,7 +222,9 @@ export default function RejectModal({
 
           {/* GUDANG */}
           <div>
-            <label className={label}>Gudang</label>
+            <label className={label}>
+              Gudang <span className="text-rose-500">*</span>
+            </label>
             <input className={field} list="wh-list" placeholder="Pilih / ketik gudang" value={warehouse} onChange={(e) => setWarehouse(e.target.value)} />
             <datalist id="wh-list">
               {warehouses.map((w) => (
@@ -211,7 +236,9 @@ export default function RejectModal({
           {/* QTY / UOM / RATE */}
           <div className="grid grid-cols-3 gap-2">
             <div>
-              <label className={label}>Qty</label>
+              <label className={label}>
+                Qty <span className="text-rose-500">*</span>
+              </label>
               <input className={field} type="number" inputMode="decimal" min="0" step="any" value={qty} onChange={(e) => setQty(e.target.value)} />
             </div>
             <div>
@@ -220,17 +247,23 @@ export default function RejectModal({
             </div>
             <div>
               <label className={label}>Rate (Rp)</label>
-              <input className={field} type="number" inputMode="decimal" min="0" step="any" value={rate} onChange={(e) => setRate(e.target.value)} />
+              <div className="relative">
+                <input className={field} type="number" inputMode="decimal" min="0" step="any" value={rate} onChange={(e) => setRate(e.target.value)} />
+                {rateLoading && <Loader2 className="absolute right-2.5 top-3 h-4 w-4 animate-spin text-slate-400" />}
+              </div>
             </div>
           </div>
           <div className="-mt-2 text-right text-xs text-slate-500">
             Total: <b className="text-slate-900">{rupiah(total)}</b>
-            {Number(rate) === 0 && <span className="ml-1 text-slate-400">(rate 0 → diambil dari ERP saat simpan)</span>}
+            {rateLoading && <span className="ml-1 text-slate-400">(mengambil rate dari ERP · gudang {warehouse}…)</span>}
+            {!rateLoading && Number(rate) === 0 && <span className="ml-1 text-slate-400">(rate 0 → diambil dari ERP saat simpan)</span>}
           </div>
 
           {/* ALASAN */}
           <div>
-            <label className={label}>Alasan Reject</label>
+            <label className={label}>
+              Alasan / Jenis Reject <span className="text-rose-500">*</span>
+            </label>
             <select className={field} value={reason} onChange={(e) => setReason(e.target.value)}>
               <option value="">— pilih —</option>
               {REASONS.map((r) => (
@@ -244,7 +277,9 @@ export default function RejectModal({
 
           <div className="grid grid-cols-2 gap-2">
             <div>
-              <label className={label}>PIC</label>
+              <label className={label}>
+                PIC <span className="text-rose-500">*</span>
+              </label>
               <input className={field} placeholder="Nama petugas" value={pic} onChange={(e) => setPic(e.target.value)} />
             </div>
             <div>
