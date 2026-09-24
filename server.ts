@@ -6,6 +6,7 @@ import { checkErp, createStockEntry, listWarehouses, lookupRate, searchItems } f
 import { appendRow, checkSheet } from './server/sheets';
 import { findRecord, listRecords, nextDocNumber, saveRecord } from './server/store';
 import type { RejectRecord } from './src/types';
+import { withTimeout } from './server/util';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isProd = process.env.NODE_ENV === 'production' || process.argv.includes('--prod');
@@ -81,7 +82,7 @@ async function start() {
     if (!configured) return { ok: false, skipped: true, message: 'Belum dikonfigurasi di .env', details };
     const t = Date.now();
     try {
-      const message = await fn();
+      const message = await withTimeout(fn(), 30000, 'Timeout 30 detik. Server tidak merespons; cek URL, jaringan, atau firewall.');
       return { ok: true, skipped: false, message, details: { ...details, Latensi: `${Date.now() - t} ms` } };
     } catch (e) {
       return { ok: false, skipped: false, message: errMsg(e), details };
