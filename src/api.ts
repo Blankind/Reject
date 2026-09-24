@@ -20,7 +20,12 @@ export interface CheckReport {
 }
 
 export const api = {
-  check: () => j<CheckReport>('/api/check'),
+  check: () => j<CheckReport>('/api/check', { signal: AbortSignal.timeout(45000) }).catch((e: Error) => {
+    if (e.name === 'TimeoutError' || e.name === 'AbortError') {
+      throw new Error('Server tidak menjawab dalam 45 detik. Pastikan `npm run dev` masih berjalan.');
+    }
+    throw e;
+  }),
   meta: () => j<Meta>('/api/meta'),
   rejects: () => j<RejectRecord[]>('/api/rejects'),
   items: (q: string) => j<ErpItem[]>(`/api/items?q=${encodeURIComponent(q)}`),
