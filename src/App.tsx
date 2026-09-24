@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useState } from 'react';
-import { PackagePlus, PackageX, RefreshCw } from 'lucide-react';
+import { PackagePlus, PackageX, RefreshCw, Settings } from 'lucide-react';
 import { api } from './api';
 import type { Meta, RejectRecord } from './types';
 import Dashboard from './components/Dashboard';
 import RejectModal from './components/RejectModal';
+import SettingsModal from './components/SettingsModal';
 
 export default function App() {
   const [records, setRecords] = useState<RejectRecord[]>([]);
   const [meta, setMeta] = useState<Meta | null>(null);
   const [open, setOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [retrying, setRetrying] = useState(false);
   const [toast, setToast] = useState<{ text: string; ok: boolean } | null>(null);
@@ -86,6 +88,13 @@ export default function App() {
               </button>
             )}
             <button
+              onClick={() => setSettingsOpen(true)}
+              title="Pengaturan & cek koneksi"
+              className="rounded-lg p-2 text-slate-500 hover:bg-slate-100"
+            >
+              <Settings className="h-4 w-4" />
+            </button>
+            <button
               onClick={load}
               title="Muat ulang"
               className="rounded-lg p-2 text-slate-500 hover:bg-slate-100"
@@ -108,6 +117,15 @@ export default function App() {
       >
         <PackagePlus className="h-7 w-7" />
       </button>
+
+      {settingsOpen && (
+        <SettingsModal
+          onClose={() => {
+            setSettingsOpen(false);
+            api.meta().then(setMeta).catch(() => {});
+          }}
+        />
+      )}
 
       {open && <RejectModal onClose={() => setOpen(false)} onSaved={onSaved} />}
 
