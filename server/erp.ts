@@ -132,3 +132,30 @@ export async function createStockEntry(r: RejectRecord): Promise<string | null> 
   const res = await erp(`/api/resource/${encodeURIComponent('Stock Entry')}`, { method: 'POST', body });
   return res?.data?.name || null;
 }
+
+/** Tes koneksi ERP: login token, izin baca Item & Warehouse, dan gudang reject. */
+export async function checkErp(): Promise<string> {
+  const who = await erp('/api/method/frappe.auth.get_logged_user');
+  const parts: string[] = [`login sebagai ${who?.message || 'user'}`];
+  try {
+    await searchItems('', 1);
+    parts.push('baca Item OK');
+  } catch (e) {
+    parts.push(`baca Item GAGAL (${(e as Error).message})`);
+  }
+  try {
+    const w = await listWarehouses();
+    parts.push(`${w.length} gudang terbaca`);
+  } catch (e) {
+    parts.push(`baca Warehouse GAGAL (${(e as Error).message})`);
+  }
+  if (env.erp.rejectWarehouse) {
+    try {
+      await erp(`/api/resource/Warehouse/${encodeURIComponent(env.erp.rejectWarehouse)}`);
+      parts.push('gudang reject ditemukan');
+    } catch {
+      parts.push(`gudang reject "${env.erp.rejectWarehouse}" TIDAK ditemukan`);
+    }
+  }
+  return parts.join(' · ');
+}
