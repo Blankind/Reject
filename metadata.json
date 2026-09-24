@@ -1,0 +1,8 @@
+{
+  "name": "DistriReject ERPNext & Spreadsheet Multi-Device",
+  "description": "Aplikasi pencatatan data item reject distributor dengan integrasi ERPNext (katalog master, item name, valuation rate, list warehouse), sinkronisasi multi-device, dan spreadsheet grid view otomatis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
