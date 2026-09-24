@@ -39,7 +39,7 @@ export default function App() {
 
   const onSaved = (r: RejectRecord) => {
     setRecords((prev) => [r, ...prev.filter((x) => x.id !== r.id)]);
-    const bad = r.erpStatus === 'failed' || r.sheetStatus === 'failed';
+    const bad = r.sheetStatus === 'failed';
     say(
       bad ? `${r.docNumber} tersimpan, sync gagal (bisa di-retry).` : `${r.docNumber} tersimpan & tersinkron.`,
       !bad,
@@ -59,7 +59,7 @@ export default function App() {
     }
   };
 
-  const failed = records.filter((r) => r.erpStatus === 'failed' || r.sheetStatus === 'failed').length;
+  const failed = records.filter((r) => r.sheetStatus === 'failed').length;
 
   return (
     <div className="min-h-screen pb-28">
@@ -72,7 +72,7 @@ export default function App() {
             <div className="leading-tight">
               <div className="text-sm font-extrabold">Reject Dashboard</div>
               <div className="text-[11px] text-slate-500">
-                ERP {meta?.erpConfigured ? '●' : '○'} · Sheets {meta?.sheetConfigured ? '●' : '○'}
+                Item ERP {meta?.erpConfigured ? '●' : '○'} · Sheets {meta?.sheetConfigured ? '●' : '○'}
               </div>
             </div>
           </div>
