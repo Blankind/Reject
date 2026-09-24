@@ -17,7 +17,6 @@ const HEADER = [
   'Alasan',
   'PIC',
   'Catatan',
-  'ERP Doc',
 ];
 
 const BASE = 'https://sheets.googleapis.com/v4/spreadsheets';
@@ -72,7 +71,7 @@ async function ensureSheet(): Promise<void> {
       body: { requests: [{ addSheet: { properties: { title: env.google.sheetName } } }] },
     });
   }
-  const head = await call(`/values/${range('A1:N1')}`);
+  const head = await call(`/values/${range('A1:M1')}`);
   if (!head.values?.[0]?.length) {
     await call(`/values/${range('A1')}?valueInputOption=RAW`, {
       method: 'PUT',
@@ -100,7 +99,7 @@ export async function appendRow(r: RejectRecord): Promise<void> {
 }
 
 async function doAppend(r: RejectRecord): Promise<void> {
-  await call(`/values/${range('A:N')}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, {
+  await call(`/values/${range('A:M')}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, {
     method: 'POST',
     body: {
       values: [
@@ -118,7 +117,6 @@ async function doAppend(r: RejectRecord): Promise<void> {
           r.reason,
           r.pic,
           r.notes,
-          r.erpDoc || '',
         ],
       ],
     },
