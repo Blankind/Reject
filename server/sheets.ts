@@ -75,8 +75,24 @@ async function ensureSheet(): Promise<void> {
   ready = true;
 }
 
-export async function appendRow(r: RejectRecord): Promise<void> {
+/** Tes koneksi: auth + tab + header. Lempar error jika gagal. */
+export async function checkSheet(): Promise<string> {
+  ready = false;
   await ensureSheet();
+  return `OK, tab "${env.google.sheetName}" siap`;
+}
+
+export async function appendRow(r: RejectRecord): Promise<void> {
+  try {
+    await ensureSheet();
+    await doAppend(r);
+  } catch (e) {
+    ready = false; // tab/header bisa saja dihapus; cek ulang di percobaan berikutnya
+    throw e;
+  }
+}
+
+async function doAppend(r: RejectRecord): Promise<void> {
   await call(`/values/${range('A:N')}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, {
     method: 'POST',
     body: {
