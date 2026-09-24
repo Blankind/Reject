@@ -2,7 +2,7 @@ import express, { NextFunction, Request, Response } from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { env, erpConfigured, erpWriteEnabled, sheetConfigured } from './server/env';
-import { createStockEntry, listWarehouses, lookupRate, searchItems } from './server/erp';
+import { checkErp, createStockEntry, listWarehouses, lookupRate, searchItems } from './server/erp';
 import { appendRow, checkSheet } from './server/sheets';
 import { findRecord, listRecords, nextDocNumber, saveRecord } from './server/store';
 import type { RejectRecord } from './src/types';
@@ -75,21 +75,46 @@ async function start() {
     res.json(await listWarehouses());
   }));
 
-  // Diagnosa koneksi: buka http://localhost:3000/api/check
+  // Cek koneksi ERP & Google Sheets (dipakai halaman Pengaturan)
+  const mask = (v: string) => (v ? `${v.slice(0, 4)}••••` : '-');
+  async function probe(configured: boolean, details: Record<string, string>, fn: () => Promise<string>) {
+    if (!configured) return { ok: false, skipped: true, message: 'Belum dikonfigurasi di .env', details };
+    const t = Date.now();
+    try {
+      const message = await fn();
+      return { ok: true, skipped: false, message, details: { ...details, Latensi: `${Date.now() - t} ms` } };
+    } catch (e) {
+      return { ok: false, skipped: false, message: errMsg(e), details };
+    }
+  }
+
   app.get('/api/check', wrap(async (_req, res) => {
-    const out: Record<string, string> = {};
-    try {
-      out.sheets = sheetConfigured() ? await checkSheet() : 'SKIP: GOOGLE_* belum diisi';
-    } catch (e) {
-      out.sheets = `GAGAL: ${errMsg(e)}`;
-    }
-    try {
-      out.erp = erpConfigured() ? `OK, ${(await searchItems('', 1)).length} item terbaca` : 'SKIP: ERP_* belum diisi';
-    } catch (e) {
-      out.erp = `GAGAL: ${errMsg(e)}`;
-    }
-    out.erpStockEntry = erpWriteEnabled() ? 'AKTIF' : 'NONAKTIF (ERP_CREATE_STOCK_ENTRY / ERP_REJECT_WAREHOUSE)';
-    res.json(out);
+    const [sheets, erp] = await Promise.all([
+      probe(
+        sheetConfigured(),
+        {
+          'Service Account': env.google.email || '-',
+          'Spreadsheet ID': env.google.sheetId || '-',
+          Tab: env.google.sheetName,
+        },
+        checkSheet,
+      ),
+      probe(
+        erpConfigured(),
+        {
+          URL: env.erp.url || '-',
+          'API Key': mask(env.erp.key),
+          'Sync Stock Entry': erpWriteEnabled()
+            ? `AKTIF (${env.erp.submit ? 'Submit' : 'Draft'}) → ${env.erp.rejectWarehouse}`
+            : 'NONAKTIF',
+        },
+        checkErp,
+      ),
+    ]);
+    res.json({
+      sheets: { ...sheets, url: env.google.sheetId ? `https://docs.google.com/spreadsheets/d/${env.google.sheetId}/edit` : '' },
+      erp,
+    });
   }));
 
   app.get('/api/rejects', (_req, res) => {
