@@ -7,7 +7,20 @@ async function j<T>(url: string, init?: RequestInit): Promise<T> {
   return data as T;
 }
 
+export interface CheckResult {
+  ok: boolean;
+  skipped: boolean;
+  message: string;
+  details: Record<string, string>;
+  url?: string;
+}
+export interface CheckReport {
+  sheets: CheckResult;
+  erp: CheckResult;
+}
+
 export const api = {
+  check: () => j<CheckReport>('/api/check'),
   meta: () => j<Meta>('/api/meta'),
   rejects: () => j<RejectRecord[]>('/api/rejects'),
   items: (q: string) => j<ErpItem[]>(`/api/items?q=${encodeURIComponent(q)}`),
