@@ -225,14 +225,10 @@ export default function Dashboard({
                   <td className="px-4 py-2.5 text-slate-600">{r.reason}</td>
                   <td className="px-4 py-2.5">
                     <div className="flex gap-1">
-                      <Badge label="ERP" state={r.erpStatus} title={r.erpError || r.erpDoc} />
                       <Badge label="Sheet" state={r.sheetStatus} title={r.sheetError} />
                     </div>
-                    {(r.erpError || r.sheetError) && (
-                      <div className="mt-1 max-w-xs text-[11px] leading-snug text-rose-600">
-                        {r.erpError && <div>ERP: {r.erpError}</div>}
-                        {r.sheetError && <div>Sheet: {r.sheetError}</div>}
-                      </div>
+                    {r.sheetError && (
+                      <div className="mt-1 max-w-xs text-[11px] leading-snug text-rose-600">{r.sheetError}</div>
                     )}
                   </td>
                 </tr>
