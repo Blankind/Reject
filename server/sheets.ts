@@ -1,5 +1,6 @@
 import { JWT } from 'google-auth-library';
 import { env, sheetConfigured } from './env';
+import { withTimeout } from './util';
 import type { RejectRecord } from '../src/types';
 
 const HEADER = [
@@ -30,7 +31,13 @@ async function call(path: string, init: { method?: string; body?: unknown } = {}
     key: env.google.key,
     scopes: ['https://www.googleapis.com/auth/spreadsheets'],
   });
-  const token = (await auth.getAccessToken()).token;
+  const token = (
+    await withTimeout(
+      auth.getAccessToken(),
+      15000,
+      'Timeout 15 detik menghubungi oauth2.googleapis.com. Jaringan/firewall/proxy/VPN mungkin memblokir Google.',
+    )
+  ).token;
   if (!token) throw new Error('Gagal mendapat access token Google. Cek email & private key.');
   const res = await fetch(`${BASE}/${env.google.sheetId}${path}`, {
     method: init.method || 'GET',
