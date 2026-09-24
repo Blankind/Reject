@@ -30,6 +30,8 @@ export const api = {
   rejects: () => j<RejectRecord[]>('/api/rejects'),
   items: (q: string) => j<ErpItem[]>(`/api/items?q=${encodeURIComponent(q)}`),
   warehouses: () => j<string[]>('/api/warehouses'),
+  rate: (itemCode: string, warehouse: string) =>
+    j<{ rate: number }>(`/api/rate?itemCode=${encodeURIComponent(itemCode)}&warehouse=${encodeURIComponent(warehouse)}`),
   create: (body: Record<string, unknown>) =>
     j<RejectRecord>('/api/rejects', {
       method: 'POST',
