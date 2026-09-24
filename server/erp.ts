@@ -1,5 +1,5 @@
-import { env, erpConfigured, erpWriteEnabled } from './env';
-import type { ErpItem, RejectRecord } from '../src/types';
+import { env, erpConfigured } from './env';
+import type { ErpItem } from '../src/types';
 
 async function erp(path: string, init: { method?: string; body?: unknown } = {}): Promise<any> {
   if (!erpConfigured()) throw new Error('ERPNext belum dikonfigurasi (.env).');
@@ -104,36 +104,7 @@ export async function lookupRate(itemCode: string, warehouse: string): Promise<n
   }
 }
 
-/**
- * Sync reject ke ERPNext = Stock Entry (Material Transfer): gudang asal -> gudang reject.
- * Return nama dokumen, atau null jika fitur write nonaktif.
- */
-export async function createStockEntry(r: RejectRecord): Promise<string | null> {
-  if (!erpWriteEnabled()) return null;
-  if (r.warehouse === env.erp.rejectWarehouse) {
-    throw new Error('Gudang asal sama dengan gudang reject; Stock Entry dilewati.');
-  }
-  const body: Record<string, unknown> = {
-    stock_entry_type: 'Material Transfer',
-    purpose: 'Material Transfer',
-    docstatus: env.erp.submit ? 1 : 0,
-    remarks: `Reject ${r.docNumber} | ${r.reason} | PIC: ${r.pic}${r.notes ? ' | ' + r.notes : ''}`,
-    items: [
-      {
-        item_code: r.itemCode,
-        qty: r.qty,
-        s_warehouse: r.warehouse,
-        t_warehouse: env.erp.rejectWarehouse,
-        ...(r.rate > 0 ? { basic_rate: r.rate } : {}),
-      },
-    ],
-  };
-  if (env.erp.company) body.company = env.erp.company;
-  const res = await erp(`/api/resource/${encodeURIComponent('Stock Entry')}`, { method: 'POST', body });
-  return res?.data?.name || null;
-}
-
-/** Tes koneksi ERP: login token, izin baca Item & Warehouse, dan gudang reject. */
+/** Tes koneksi ERP: login token + izin baca Item & Warehouse. ERP hanya dipakai untuk baca (search item & rate). */
 export async function checkErp(): Promise<string> {
   const who = await erp('/api/method/frappe.auth.get_logged_user');
   const parts: string[] = [`login sebagai ${who?.message || 'user'}`];
@@ -148,14 +119,6 @@ export async function checkErp(): Promise<string> {
     parts.push(`${w.length} gudang terbaca`);
   } catch (e) {
     parts.push(`baca Warehouse GAGAL (${(e as Error).message})`);
-  }
-  if (env.erp.rejectWarehouse) {
-    try {
-      await erp(`/api/resource/Warehouse/${encodeURIComponent(env.erp.rejectWarehouse)}`);
-      parts.push('gudang reject ditemukan');
-    } catch {
-      parts.push(`gudang reject "${env.erp.rejectWarehouse}" TIDAK ditemukan`);
-    }
   }
   return parts.join(' · ');
 }
