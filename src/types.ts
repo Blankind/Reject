@@ -15,9 +15,6 @@ export interface RejectRecord {
   reason: string;
   pic: string;
   notes: string;
-  erpStatus: SyncState;
-  erpDoc?: string;
-  erpError?: string;
   sheetStatus: SyncState;
   sheetError?: string;
   createdAt: string;
@@ -34,7 +31,6 @@ export interface ErpItem {
 
 export interface Meta {
   erpConfigured: boolean;
-  erpWrite: boolean;
   sheetConfigured: boolean;
   sheetUrl: string;
 }
