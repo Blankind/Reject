@@ -1,444 +1,160 @@
-import dotenv from 'dotenv';
-dotenv.config();
-
-import express from 'express';
-import { createServer as createViteServer } from 'vite';
+import express, { NextFunction, Request, Response } from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import fs from 'fs';
-import { GoogleSheetsServiceAccount, GoogleServiceAccountConfig } from './server/googleSheetsService';
-import { RejectItemRecord, deduplicateRecords } from './src/types/reject';
+import { env, erpConfigured, erpWriteEnabled, sheetConfigured } from './server/env';
+import { createStockEntry, listWarehouses, lookupRate, searchItems } from './server/erp';
+import { appendRow } from './server/sheets';
+import { findRecord, listRecords, nextDocNumber, saveRecord } from './server/store';
+import type { RejectRecord } from './src/types';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.resolve(__dirname, 'data');
-const STORE_FILE = path.resolve(DATA_DIR, 'shared_store.json');
+const isProd = process.env.NODE_ENV === 'production' || process.argv.includes('--prod');
 
-// Interface for persistent store
-interface SharedStore {
-  records: any[];
-  gsheetWebhook: string;
-  gsheetSpreadsheetUrl?: string;
-  googleServiceAccount?: {
-    clientEmail: string;
-    privateKey: string;
-    spreadsheetId: string;
-  };
-  erpConfig?: {
-    baseUrl: string;
-    apiKey: string;
-    apiSecret: string;
-    loggedUser?: string;
-    isConnected?: boolean;
-  };
-  lastUpdated: string;
+const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+const wrap =
+  (fn: (req: Request, res: Response) => Promise<unknown>) => (req: Request, res: Response, next: NextFunction) =>
+    fn(req, res).catch(next);
+
+function nowParts() {
+  const d = new Date();
+  const date = d.toLocaleDateString('sv-SE', { timeZone: env.tz });
+  const time = d.toLocaleTimeString('en-GB', { timeZone: env.tz, hour: '2-digit', minute: '2-digit' });
+  return { date, time };
 }
 
-// In-memory cache + persistent storage
-let memoryStore: SharedStore = {
-  records: [],
-  gsheetWebhook: '',
-  gsheetSpreadsheetUrl: '',
-  lastUpdated: new Date().toISOString(),
-};
-
-function getEffectiveGoogleConfig(): GoogleServiceAccountConfig {
-  const envEmail = (process.env.GOOGLE_CLIENT_EMAIL || '').trim();
-  const envKey = (process.env.GOOGLE_PRIVATE_KEY || '').trim();
-  const envSheetId = (process.env.GOOGLE_SPREADSHEET_ID || process.env.SPREADSHEET_ID || '').trim();
-
-  const storeConfig = memoryStore.googleServiceAccount || {
-    clientEmail: '',
-    privateKey: '',
-    spreadsheetId: '',
-  };
-
-  return {
-    clientEmail: envEmail || storeConfig.clientEmail || '',
-    privateKey: envKey || storeConfig.privateKey || '',
-    spreadsheetId: envSheetId || storeConfig.spreadsheetId || '',
-  };
-}
-
-function loadStoreFromFile(): void {
-  try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
+/** Sync satu record ke ERP + Sheets. Aman dipanggil ulang (hanya langkah yang belum 'ok'). */
+async function syncRecord(r: RejectRecord): Promise<RejectRecord> {
+  if (r.erpStatus !== 'ok') {
+    try {
+      const doc = await createStockEntry(r);
+      r.erpStatus = doc ? 'ok' : 'skipped';
+      r.erpDoc = doc || r.erpDoc;
+      r.erpError = undefined;
+    } catch (e) {
+      r.erpStatus = 'failed';
+      r.erpError = errMsg(e);
     }
-    if (fs.existsSync(STORE_FILE)) {
-      const content = fs.readFileSync(STORE_FILE, 'utf-8');
-      const parsed = JSON.parse(content);
-      if (parsed && typeof parsed === 'object') {
-        const rawRecords = Array.isArray(parsed.records) ? parsed.records : [];
-        const cleanRecords = deduplicateRecords(rawRecords);
-        memoryStore = {
-          records: cleanRecords,
-          gsheetWebhook: typeof parsed.gsheetWebhook === 'string' ? parsed.gsheetWebhook : '',
-          gsheetSpreadsheetUrl: typeof parsed.gsheetSpreadsheetUrl === 'string' ? parsed.gsheetSpreadsheetUrl : '',
-          googleServiceAccount: parsed.googleServiceAccount,
-          erpConfig: parsed.erpConfig,
-          lastUpdated: parsed.lastUpdated || new Date().toISOString(),
-        };
-        console.log(`[Store] Loaded ${memoryStore.records.length} unique records from persistent store`);
+  }
+  if (r.sheetStatus !== 'ok') {
+    if (!sheetConfigured()) {
+      r.sheetStatus = 'skipped';
+      r.sheetError = undefined;
+    } else {
+      try {
+        await appendRow(r);
+        r.sheetStatus = 'ok';
+        r.sheetError = undefined;
+      } catch (e) {
+        r.sheetStatus = 'failed';
+        r.sheetError = errMsg(e);
       }
     }
-  } catch (err) {
-    console.warn('[Store] Failed to load store file, using in-memory store:', err);
   }
+  saveRecord(r);
+  return r;
 }
 
-function saveStoreToFile(): void {
-  try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-    fs.writeFileSync(STORE_FILE, JSON.stringify(memoryStore, null, 2), 'utf-8');
-  } catch (err) {
-    console.error('[Store] Failed to write store file:', err);
-  }
-}
-
-async function startServer() {
-  loadStoreFromFile();
-
+async function start() {
   const app = express();
-  const PORT = Number(process.env.PORT) || 3000;
+  app.use(express.json({ limit: '1mb' }));
 
-  app.use(express.json({ limit: '50mb' }));
-  app.use(express.urlencoded({ limit: '50mb', extended: true }));
-
-  // CORS middleware for API routes
-  app.use((req, res, next) => {
-    res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-    if (req.method === 'OPTIONS') {
-      return res.sendStatus(200);
-    }
-    next();
-  });
-
-  // Real ERPNext Backend Proxy Route:
-  // Bypasses browser CORS and Mixed Content restrictions so the frontend can communicate with ANY
-  // Frappe / ERPNext server (Frappe Cloud, self-hosted, HTTP, custom port, VPN)
-  app.post('/api/erpnext-proxy', async (req, res) => {
-    try {
-      const { targetUrl, method = 'GET', headers = {}, body } = req.body;
-
-      if (!targetUrl) {
-        return res.status(400).json({ error: 'targetUrl is required in request body' });
-      }
-
-      const requestHeaders: Record<string, string> = {
-        'Accept': 'application/json',
-        ...headers,
-      };
-
-      const fetchOptions: RequestInit = {
-        method,
-        headers: requestHeaders,
-      };
-
-      if (body && ['POST', 'PUT', 'PATCH'].includes(method.toUpperCase())) {
-        fetchOptions.body = typeof body === 'string' ? body : JSON.stringify(body);
-        if (!requestHeaders['Content-Type']) {
-          requestHeaders['Content-Type'] = 'application/json';
-        }
-      }
-
-      const erpResponse = await fetch(targetUrl, fetchOptions);
-      const contentType = erpResponse.headers.get('content-type') || '';
-
-      if (contentType.includes('application/json')) {
-        const jsonData = await erpResponse.json();
-        return res.status(erpResponse.status).json(jsonData);
-      } else {
-        const textData = await erpResponse.text();
-        return res.status(erpResponse.status).send(textData);
-      }
-    } catch (err: any) {
-      console.error('ERPNext proxy error:', err);
-      return res.status(502).json({
-        error: 'Bad Gateway / ERPNext Connection Error',
-        message: err.message || 'Tidak dapat menghubungi server ERPNext. Pastikan URL dan koneksi internet server valid.',
-      });
-    }
-  });
-
-  // Google Sheets / Apps Script Backend Proxy:
-  // Allows the frontend to read Google Sheets or Apps Script Webhooks without CORS or redirect blocks
-  app.post('/api/gsheet-proxy', async (req, res) => {
-    try {
-      const { url, method = 'GET', body } = req.body;
-      if (!url) {
-        return res.status(400).json({ error: 'url is required' });
-      }
-
-      const fetchOptions: RequestInit = {
-        method,
-        redirect: 'follow',
-        headers: {
-          'Accept': 'application/json, text/plain, text/csv, */*',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        },
-      };
-
-      if (body && ['POST', 'PUT', 'PATCH'].includes(method.toUpperCase())) {
-        fetchOptions.body = typeof body === 'string' ? body : JSON.stringify(body);
-        (fetchOptions.headers as Record<string, string>)['Content-Type'] = 'application/json';
-      }
-
-      const gResponse = await fetch(url, fetchOptions);
-      const contentType = gResponse.headers.get('content-type') || '';
-      const text = await gResponse.text();
-
-      if (contentType.includes('application/json')) {
-        try {
-          return res.status(gResponse.status).json(JSON.parse(text));
-        } catch {
-          return res.status(gResponse.status).send(text);
-        }
-      } else {
-        res.setHeader('Content-Type', contentType || 'text/plain');
-        return res.status(gResponse.status).send(text);
-      }
-    } catch (err: any) {
-      console.error('GSheet proxy error:', err);
-      return res.status(502).json({
-        error: 'GSheet Proxy Error',
-        message: err.message || 'Tidak dapat mengambil data dari Google Sheets.',
-      });
-    }
-  });
-
-  // Centralized Shared Data API for Multi-Device & Cross-Network Sync
-  // Ensures all devices (mobile phones, tablets, other PCs) on ANY network have the exact same
-  // spreadsheet rows and configuration without relying solely on isolated browser LocalStorage.
-  app.get('/api/shared-data', (_req, res) => {
-    return res.json({
-      success: true,
-      records: memoryStore.records,
-      gsheetWebhook: memoryStore.gsheetWebhook,
-      gsheetSpreadsheetUrl: memoryStore.gsheetSpreadsheetUrl,
-      erpConfig: memoryStore.erpConfig,
-      lastUpdated: memoryStore.lastUpdated,
+  app.get('/api/meta', (_req, res) => {
+    res.json({
+      erpConfigured: erpConfigured(),
+      erpWrite: erpWriteEnabled(),
+      sheetConfigured: sheetConfigured(),
+      sheetUrl: env.google.sheetId ? `https://docs.google.com/spreadsheets/d/${env.google.sheetId}/edit` : '',
     });
   });
 
-  app.post('/api/shared-data', (req, res) => {
-    try {
-      const { records, gsheetWebhook, gsheetSpreadsheetUrl, erpConfig } = req.body;
+  app.get('/api/items', wrap(async (req, res) => {
+    res.json(await searchItems(String(req.query.q || '')));
+  }));
 
-      if (Array.isArray(records)) {
-        memoryStore.records = deduplicateRecords(records);
-      }
-      if (typeof gsheetWebhook === 'string') {
-        memoryStore.gsheetWebhook = gsheetWebhook;
-      }
-      if (typeof gsheetSpreadsheetUrl === 'string') {
-        memoryStore.gsheetSpreadsheetUrl = gsheetSpreadsheetUrl;
-      }
-      if (erpConfig && typeof erpConfig === 'object') {
-        memoryStore.erpConfig = erpConfig;
-      }
+  app.get('/api/warehouses', wrap(async (_req, res) => {
+    res.json(await listWarehouses());
+  }));
 
-      memoryStore.lastUpdated = new Date().toISOString();
-      saveStoreToFile();
-
-      return res.json({
-        success: true,
-        count: memoryStore.records.length,
-        lastUpdated: memoryStore.lastUpdated,
-      });
-    } catch (err: any) {
-      console.error('Error saving shared data:', err);
-      return res.status(500).json({ error: 'Failed to save shared data', message: err.message });
-    }
+  app.get('/api/rejects', (_req, res) => {
+    res.json(listRecords());
   });
 
-  // ==========================================
-  // DIRECT GOOGLE SHEETS VIA SERVICE ACCOUNT
-  // ==========================================
+  app.post('/api/rejects', wrap(async (req, res) => {
+    const b = req.body || {};
+    const id = String(b.id || '').trim();
+    const itemCode = String(b.itemCode || '').trim();
+    const itemName = String(b.itemName || '').trim();
+    const warehouse = String(b.warehouse || '').trim();
+    const reason = String(b.reason || '').trim();
+    const pic = String(b.pic || '').trim();
+    const qty = Number(b.qty);
 
-  // Check Service Account status & configuration
-  app.get('/api/gsheet-service-account/config', (_req, res) => {
-    const cfg = getEffectiveGoogleConfig();
-    const isConfigured = !!(cfg.clientEmail && cfg.privateKey && cfg.spreadsheetId);
-    const source = process.env.GOOGLE_CLIENT_EMAIL
-      ? 'env'
-      : memoryStore.googleServiceAccount?.clientEmail
-      ? 'store'
-      : 'none';
+    if (!id) return res.status(400).json({ error: 'id wajib.' });
+    if (!itemCode && !itemName) return res.status(400).json({ error: 'Item wajib diisi.' });
+    if (!warehouse) return res.status(400).json({ error: 'Gudang wajib diisi.' });
+    if (!(qty > 0)) return res.status(400).json({ error: 'Qty harus > 0.' });
+    if (!reason) return res.status(400).json({ error: 'Alasan wajib diisi.' });
+    if (!pic) return res.status(400).json({ error: 'PIC wajib diisi.' });
 
-    return res.json({
-      isConfigured,
-      clientEmail: cfg.clientEmail,
-      spreadsheetId: cfg.spreadsheetId,
-      hasPrivateKey: !!cfg.privateKey,
-      source,
-      spreadsheetUrl: cfg.spreadsheetId
-        ? `https://docs.google.com/spreadsheets/d/${GoogleSheetsServiceAccount.extractSpreadsheetId(
-            cfg.spreadsheetId
-          )}/edit`
-        : '',
-    });
+    // Idempotent: request ganda (double tap / retry jaringan) tidak membuat baris baru
+    const existing = findRecord(id);
+    if (existing) return res.json(existing);
+
+    let rate = Number(b.rate) || 0;
+    if (rate <= 0 && itemCode) rate = await lookupRate(itemCode, warehouse);
+
+    const { date, time } = nowParts();
+    const record: RejectRecord = {
+      id,
+      docNumber: nextDocNumber(date),
+      date,
+      time,
+      itemCode: itemCode || '-',
+      itemName: itemName || itemCode,
+      warehouse,
+      qty,
+      uom: String(b.uom || 'Pcs').trim(),
+      rate,
+      total: Math.round(qty * rate * 100) / 100,
+      reason,
+      pic,
+      notes: String(b.notes || '').trim(),
+      erpStatus: 'pending',
+      sheetStatus: 'pending',
+      createdAt: new Date().toISOString(),
+    };
+    saveRecord(record); // simpan lokal dulu: data tidak hilang kalau ERP/Sheets gagal
+    res.json(await syncRecord(record));
+  }));
+
+  app.post('/api/rejects/retry', wrap(async (_req, res) => {
+    const todo = listRecords().filter((r) => r.erpStatus !== 'ok' || r.sheetStatus !== 'ok');
+    for (const r of [...todo].reverse()) await syncRecord(r); // urut lama -> baru
+    res.json({ retried: todo.length });
+  }));
+
+  app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    console.error(err);
+    res.status(500).json({ error: errMsg(err) });
   });
 
-  // Save / update Service Account credentials in store and test connection
-  app.post('/api/gsheet-service-account/config', async (req, res) => {
-    try {
-      const { clientEmail, privateKey, spreadsheetId } = req.body;
-      const current = getEffectiveGoogleConfig();
-
-      const targetConfig: GoogleServiceAccountConfig = {
-        clientEmail: (clientEmail ?? current.clientEmail).trim(),
-        privateKey: (privateKey ?? current.privateKey).trim(),
-        spreadsheetId: (spreadsheetId ?? current.spreadsheetId).trim(),
-      };
-
-      // Test connection with Google Sheets API v4
-      const testResult = await GoogleSheetsServiceAccount.testConnection(targetConfig);
-
-      memoryStore.googleServiceAccount = targetConfig;
-      memoryStore.gsheetSpreadsheetUrl = testResult.url;
-      memoryStore.lastUpdated = new Date().toISOString();
-      saveStoreToFile();
-
-      return res.json({
-        ...testResult,
-        message: `Berhasil terhubung ke spreadsheet: "${testResult.spreadsheetTitle}"`,
-      });
-    } catch (err: any) {
-      console.error('Service Account Config Error:', err);
-      return res.status(400).json({
-        success: false,
-        error: err.message || 'Gagal menghubungkan Google Service Account',
-      });
-    }
-  });
-
-  // Test Service Account connection without saving
-  app.post('/api/gsheet-service-account/test', async (req, res) => {
-    try {
-      const current = getEffectiveGoogleConfig();
-      const { clientEmail, privateKey, spreadsheetId } = req.body || {};
-
-      const targetConfig: GoogleServiceAccountConfig = {
-        clientEmail: (clientEmail || current.clientEmail).trim(),
-        privateKey: (privateKey || current.privateKey).trim(),
-        spreadsheetId: (spreadsheetId || current.spreadsheetId).trim(),
-      };
-
-      const testResult = await GoogleSheetsServiceAccount.testConnection(targetConfig);
-      return res.json({
-        ...testResult,
-        message: `Koneksi valid! Terhubung ke spreadsheet: "${testResult.spreadsheetTitle}"`,
-      });
-    } catch (err: any) {
-      return res.status(400).json({
-        success: false,
-        error: err.message || 'Koneksi Service Account gagal',
-      });
-    }
-  });
-
-  // Push records directly to Google Sheet via Service Account
-  app.post('/api/gsheet-service-account/push', async (req, res) => {
-    try {
-      const cfg = getEffectiveGoogleConfig();
-      if (!cfg.clientEmail || !cfg.privateKey || !cfg.spreadsheetId) {
-        return res.status(400).json({
-          success: false,
-          error:
-            'Kredensial Google Service Account (GOOGLE_CLIENT_EMAIL, GOOGLE_PRIVATE_KEY) atau ID Spreadsheet belum lengkap.',
-        });
-      }
-
-      const rawRecords = Array.isArray(req.body?.records) ? req.body.records : memoryStore.records;
-      const records = deduplicateRecords(rawRecords);
-      const result = await GoogleSheetsServiceAccount.pushRecordsToSheet(cfg, records);
-
-      // Keep server cache in sync with deduplicated records
-      memoryStore.records = records;
-      memoryStore.lastUpdated = new Date().toISOString();
-      saveStoreToFile();
-
-      return res.json({
-        ...result,
-        message: `Berhasil sinkronisasi ${records.length} baris ke Google Sheets!`,
-      });
-    } catch (err: any) {
-      console.error('Service Account Push Error:', err);
-      return res.status(500).json({
-        success: false,
-        error: err.message || 'Gagal mengirim data ke Google Sheets',
-      });
-    }
-  });
-
-  // Pull records directly from Google Sheet via Service Account
-  app.get('/api/gsheet-service-account/pull', async (_req, res) => {
-    try {
-      const cfg = getEffectiveGoogleConfig();
-      if (!cfg.clientEmail || !cfg.privateKey || !cfg.spreadsheetId) {
-        return res.status(400).json({
-          success: false,
-          error:
-            'Kredensial Google Service Account (GOOGLE_CLIENT_EMAIL, GOOGLE_PRIVATE_KEY) atau ID Spreadsheet belum lengkap.',
-        });
-      }
-
-      const result = await GoogleSheetsServiceAccount.pullRecordsFromSheet(cfg);
-      const cleanRecords = deduplicateRecords(result.records || []);
-      if (cleanRecords.length > 0) {
-        memoryStore.records = cleanRecords;
-        memoryStore.lastUpdated = new Date().toISOString();
-        saveStoreToFile();
-      }
-
-      return res.json({
-        success: true,
-        message: `Berhasil memuat ${cleanRecords.length} baris dari Google Sheets!`,
-        records: cleanRecords,
-        count: cleanRecords.length,
-      });
-    } catch (err: any) {
-      console.error('Service Account Pull Error:', err);
-      return res.status(500).json({
-        success: false,
-        error: err.message || 'Gagal membaca data dari Google Sheets',
-      });
-    }
-  });
-
-  // Network and Cloud URL info
-  app.get('/api/network-info', (_req, res) => {
-    return res.json({
-      appUrl: process.env.APP_URL || '',
-      port: PORT,
-      timestamp: new Date().toISOString(),
-    });
-  });
-
-  // Mount Vite middleware in development or serve built files in production
-  if (process.env.NODE_ENV === 'production') {
-    app.use(express.static(path.resolve(__dirname, 'dist')));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
-    });
+  if (isProd) {
+    const dist = path.resolve(__dirname, 'dist');
+    app.use(express.static(dist));
+    app.get('*', (_req, res) => res.sendFile(path.join(dist, 'index.html')));
   } else {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
+    const { createServer } = await import('vite');
+    const vite = await createServer({ server: { middlewareMode: true }, appType: 'spa' });
     app.use(vite.middlewares);
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[DistriReject ERPNext] Full-stack server running on http://0.0.0.0:${PORT}`);
+  app.listen(env.port, '0.0.0.0', () => {
+    console.log(`Reject Dashboard: http://localhost:${env.port}  [${isProd ? 'production' : 'dev'}]`);
+    console.log(`ERP: ${erpConfigured() ? 'on' : 'off'} (write: ${erpWriteEnabled() ? 'on' : 'off'}) | Sheets: ${sheetConfigured() ? 'on' : 'off'}`);
   });
 }
 
-startServer().catch((err) => {
-  console.error('Failed to start server:', err);
+start().catch((e) => {
+  console.error(e);
   process.exit(1);
 });
